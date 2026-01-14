@@ -1,3 +1,9 @@
+import crypto from 'node:crypto';
+// 补齐全局环境缺少的 Web Crypto API
+if (!globalThis.crypto) {
+  globalThis.crypto = crypto.webcrypto;
+}
+
 import { initRedis, getConfig, closeRedis } from './config.js';
 import { authenticate } from './auth.js';
 import StandXAPI from './api.js';

@@ -1,0 +1,33 @@
+{
+  "name": "standx-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Automated bid order bot for StandX Pre-DEX platform",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "setup": "node setup.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "standx",
+    "trading",
+    "bot",
+    "dex",
+    "perpetuals"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@noble/curves": "^2.0.1",
+    "@scure/base": "^2.0.0",
+    "axios": "^1.13.2",
+    "decimal.js": "^10.6.0",
+    "ethers": "^6.16.0",
+    "https-proxy-agent": "^7.0.6",
+    "redis": "^5.10.0",
+    "siwe": "^3.0.0",
+    "uuid": "^13.0.0",
+    "ws": "^8.19.0"
+  }
+}

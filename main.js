@@ -42,7 +42,16 @@ async function main() {
     const config = await getConfig(accountKey);
 
     if (!config) throw new Error('Config not found');
-    const { chain, walletAddress, privateKey, symbol = 'BTC-USD', proxy = null } = config;
+
+    // 1. 获取并处理代理地址
+    const rawProxy = config.proxy || null;
+    const proxy = formatProxyUrl(rawProxy);
+    
+    if (proxy) {
+      console.log(`[System] 🌐 Using Proxy: ${proxy.split('@')[1]} (User hidden)`);
+    }
+
+    const { chain, walletAddress, privateKey, symbol = 'BTC-USD' } = config;
 
     console.log(`[Main] Authenticating ${walletAddress}...`);
     const authData = await authenticate(chain, walletAddress, privateKey);
@@ -62,6 +71,17 @@ async function main() {
     console.error('Startup Error:', error.message);
     await emergencyCleanup('error');
   }
+}
+
+function formatProxyUrl(rawProxy) {
+  if (!rawProxy) return null;
+  if (rawProxy.startsWith('http')) return rawProxy;
+  const parts = rawProxy.split(':');
+  if (parts.length === 4) {
+    const [ip, port, user, pass] = parts;
+    return `http://${user}:${pass}@${ip}:${port}`;
+  }
+  return rawProxy;
 }
 
 main();

@@ -12,7 +12,6 @@ export default class StandXAPI {
     this.sessionId = uuidv4();
     this.signingKey = typeof signingKey === 'string' ? new Uint8Array(Buffer.from(signingKey, 'base64')) : signingKey;
 
-    // 初始化 Axios 客户端
     const axiosConfig = {
       baseURL: BASE_URL,
       timeout: 10000,
@@ -20,7 +19,6 @@ export default class StandXAPI {
     };
 
     if (proxyUrl) {
-      console.log(`[API] 🌐 Routing through proxy: ${proxyUrl}`);
       const agent = new HttpsProxyAgent(proxyUrl);
       axiosConfig.httpsAgent = agent;
       axiosConfig.proxy = false; 
@@ -46,6 +44,14 @@ export default class StandXAPI {
   async queryBalance() {
     const response = await this.client.get('/api/query_balance', {
       headers: { 'Authorization': `Bearer ${this.token}` }
+    });
+    return response.data;
+  }
+
+  async queryPositions(symbol) {
+    const response = await this.client.get('/api/query_positions', {
+      headers: { 'Authorization': `Bearer ${this.token}` },
+      params: { symbol }
     });
     return response.data;
   }
@@ -83,6 +89,23 @@ export default class StandXAPI {
       price: String(price), 
       time_in_force: 'gtc', 
       reduce_only: false 
+    };
+    const response = await this.client.post('/api/new_order', payload, { 
+      headers: this.getSignedHeaders(payload) 
+    });
+    return response.data;
+  }
+
+  // 特殊：市价平仓单
+  async marketOrder(symbol, side, qty) {
+    const payload = { 
+      symbol, 
+      side, 
+      order_type: 'market', 
+      qty: String(qty), 
+      price: "0", 
+      time_in_force: 'gtc', 
+      reduce_only: true // 平仓通常开启 reduce_only
     };
     const response = await this.client.post('/api/new_order', payload, { 
       headers: this.getSignedHeaders(payload) 

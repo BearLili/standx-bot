@@ -8,99 +8,57 @@ export default class PriceMonitor {
     this.ws = null;
     this.currentPrice = null;
     this.priceCallback = null;
-    
+    this.positionCallback = null;
     this.isConnected = false;
     this.lastUpdateTime = 0; 
-
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 20;
-    this.reconnectDelay = 3000;
   }
 
   connect() {
     return new Promise((resolve, reject) => {
       try {
-        const options = {};
-        if (this.proxyUrl) {
-          options.agent = new HttpsProxyAgent(this.proxyUrl);
-        }
-
+        const options = this.proxyUrl ? { agent: new HttpsProxyAgent(this.proxyUrl) } : {};
         this.ws = new WebSocket('wss://perps.standx.com/ws-stream/v1', options);
 
         this.ws.on('open', () => {
-          console.log(`[WS] Connected to ${this.symbol}${this.proxyUrl ? ' (via proxy)' : ''}`);
           this.isConnected = true;
-          this.reconnectAttempts = 0;
           this.subscribe();
           resolve();
         });
 
-        this.ws.on('message', (data) => this.handleMessage(data));
-
-        this.ws.on('error', (error) => {
-          this.isConnected = false;
-          console.error('[WS] Error:', error.message);
+        this.ws.on('message', (data) => {
+          const msg = JSON.parse(data);
+          if (msg.channel === 'price' && msg.data) {
+            this.currentPrice = parseFloat(msg.data.last_price);
+            this.lastUpdateTime = Date.now();
+            if (this.priceCallback) this.priceCallback(this.currentPrice);
+          }
+          if (msg.channel === 'position' && msg.data) {
+            // 根据文档，直接把 data 对象传给 strategy
+            if (this.positionCallback) this.positionCallback(msg.data);
+          }
         });
 
-        this.ws.on('close', () => {
-          this.isConnected = false;
-          console.log('[WS] Connection closed, reconnecting...');
-          this.reconnect();
-        });
-
-        this.ws.on('pong', () => {
-          this.lastUpdateTime = Date.now();
-        });
-      } catch (error) {
-        this.isConnected = false;
-        reject(error);
-      }
+        this.ws.on('error', (e) => { this.isConnected = false; });
+        this.ws.on('close', () => { this.isConnected = false; this.reconnect(); });
+        this.ws.on('pong', () => { this.lastUpdateTime = Date.now(); });
+      } catch (error) { reject(error); }
     });
   }
 
   subscribe() {
     if (this.ws.readyState === WebSocket.OPEN) {
-      const message = { subscribe: { channel: 'price', symbol: this.symbol } };
-      this.ws.send(JSON.stringify(message));
+      this.ws.send(JSON.stringify({ subscribe: { channel: 'price', symbol: this.symbol } }));
+      this.ws.send(JSON.stringify({ subscribe: { channel: 'position' } })); 
+      console.log(`[WS] Subscribed to Price & Position`);
     }
   }
 
-  handleMessage(data) {
-    try {
-      const message = JSON.parse(data);
-      if (message.channel === 'price' && message.data) {
-        this.currentPrice = parseFloat(message.data.last_price);
-        this.lastUpdateTime = Date.now();
-        if (this.priceCallback) this.priceCallback(this.currentPrice);
-      }
-    } catch (error) {
-      console.error('[WS] Parse error:', error);
-    }
-  }
-
+  reconnect() { setTimeout(() => this.connect(), 3000); }
   getStatus() {
-    return {
-      isConnected: this.isConnected,
-      secondsSinceLastUpdate: this.lastUpdateTime === 0 ? 0 : (Date.now() - this.lastUpdateTime) / 1000
-    };
+    return { isConnected: this.isConnected, secondsSinceLastUpdate: (Date.now() - this.lastUpdateTime) / 1000 };
   }
-
-  onPrice(callback) { this.priceCallback = callback; }
+  onPrice(cb) { this.priceCallback = cb; }
+  onPosition(cb) { this.positionCallback = cb; }
   getPrice() { return this.currentPrice; }
-
-  reconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) return;
-    this.reconnectAttempts++;
-    setTimeout(() => {
-      this.connect().catch(err => console.error('[WS] Retry failed'));
-    }, this.reconnectDelay);
-  }
-
-  close() {
-    if (this.ws) {
-      this.ws.removeAllListeners();
-      this.ws.close();
-      this.isConnected = false;
-    }
-  }
+  close() { if (this.ws) this.ws.close(); }
 }

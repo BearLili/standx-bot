@@ -1,4 +1,7 @@
 import crypto from 'node:crypto';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import axios from 'axios';
+
 // 补齐全局环境缺少的 Web Crypto API
 if (!globalThis.crypto) {
   globalThis.crypto = crypto.webcrypto;
@@ -48,7 +51,15 @@ async function main() {
     const proxy = formatProxyUrl(rawProxy);
     
     if (proxy) {
-      console.log(`[System] 🌐 Using Proxy: ${proxy.split('@')[1]} (User hidden)`);
+      try {
+        const response = await axios.get('https://api.ipify.org?format=json', { 
+          httpsAgent: new HttpsProxyAgent(proxy), 
+          timeout: 5000 
+        });
+        console.log(`[System] 🌐 Proxy Success! IP is: ${response.data.ip}`);
+      } catch (e) {
+        console.error(`[System] ❌ Proxy Failed: ${e.message}`);
+      }
     }
 
     const { chain, walletAddress, privateKey, symbol = 'BTC-USD' } = config;

@@ -16,7 +16,12 @@ export default class PriceMonitor {
   connect() {
     return new Promise((resolve, reject) => {
       try {
-        const options = this.proxyUrl ? { agent: new HttpsProxyAgent(this.proxyUrl) } : {};
+        const options = {};
+        if (this.proxyUrl) {
+          // 在 WebSocket 的 options 中加入 agent
+          options.agent = new HttpsProxyAgent(this.proxyUrl);
+          console.log(`[WS] Routing through proxy...`);
+        }
         this.ws = new WebSocket('wss://perps.standx.com/ws-stream/v1', options);
 
         this.ws.on('open', () => {

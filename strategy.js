@@ -1,15 +1,18 @@
 import Decimal from 'decimal.js';
 
 export default class BidStrategy {
-  constructor(api, priceMonitor, symbol) {
+  constructor(api, priceMonitor, symbol, side = 'long') {
     this.api = api;
     this.priceMonitor = priceMonitor;
     this.symbol = symbol;
+    this.side = side.toLowerCase(); // 'long' 或 'short'
+    
     this.initialPrice = null;
     this.isProcessing = false;
     this.emergencyMode = false;
     this.watchdogTimer = null;
     
+    // 策略参数
     this.offsetPercentage = 0.0022; 
     this.changeThreshold_high = 0.004; 
     this.changeThreshold_low = 0.0012; 
@@ -19,6 +22,38 @@ export default class BidStrategy {
     this.reorder = this.reorder.bind(this);
     this.checkAndClosePositions = this.checkAndClosePositions.bind(this);
     this.clearAllOpenOrders = this.clearAllOpenOrders.bind(this);
+  }
+
+  // 根据多空方向计算挂单价格
+  calculateOrderPrice(marketPrice) {
+    const p = new Decimal(marketPrice);
+    if (this.side === 'short') {
+      // 做空：在市价上方挂卖单
+      return p.times(new Decimal(1).plus(this.offsetPercentage)).toFixed(2);
+    } else {
+      // 做多：在市价下方挂买单
+      return p.times(new Decimal(1).minus(this.offsetPercentage)).toFixed(2);
+    }
+  }
+
+  // 根据多空方向判定是否需要撤单重挂
+  shouldReorder(currentPrice) {
+    if (!this.initialPrice) return true;
+    
+    const p = parseFloat(currentPrice);
+    const i = parseFloat(this.initialPrice);
+    const diff = p / i;
+
+    if (this.side === 'short') {
+      // 做空逻辑判定:
+      // (diff <= 1 - 0.004) -> 价格跌太深，远离了上方的卖单
+      // (diff >= 1 - 0.0012) -> 价格涨太高，逼近了上方的卖单
+      return (diff <= (1 - this.changeThreshold_high)) || (diff >= (1 - this.changeThreshold_low));
+    } else {
+      // 做多逻辑判定 (原逻辑):
+      let absDiff = Math.abs(diff - 1);
+      return absDiff >= this.changeThreshold_high || absDiff <= this.changeThreshold_low;
+    }
   }
 
   async checkAndClosePositions() {
@@ -47,8 +82,7 @@ export default class BidStrategy {
           const res = await this.api.marketOrder(this.symbol, side, qty.toString());
           console.log(`[Risk] Market Close Success: ${JSON.stringify(res)}`);
           
-          // 【核心修复】平仓后标记 initialPrice 为空，这样下一轮 reorder 就会立即执行
-          this.initialPrice = null;
+          this.initialPrice = null; // 平仓后强制触发重挂
           await new Promise(r => setTimeout(r, 1000));
         }
         return true; 
@@ -60,17 +94,12 @@ export default class BidStrategy {
     }
   }
 
-  // 计算和格式化逻辑保持不变
   calculateQty(price) {
     try {
       if (this.availableBalance <= 0) return 0;
       const qty = new Decimal(this.availableBalance).times(this.leverage).times(0.95).dividedBy(price);
       return (qty.toNumber() * 0.8).toFixed(3); 
     } catch (e) { return 0; }
-  }
-
-  formatPrice(price) {
-    return new Decimal(price).times(new Decimal(1).minus(this.offsetPercentage)).toFixed(2);
   }
 
   async clearAllOpenOrders() {
@@ -86,31 +115,42 @@ export default class BidStrategy {
   }
 
   async placeAndVerify(marketPrice) {
-    const orderPrice = this.formatPrice(marketPrice);
+    const orderPrice = this.calculateOrderPrice(marketPrice);
+    const orderSide = this.side === 'short' ? 'sell' : 'buy'; // 自动切换下单方向
     const qty = this.calculateQty(orderPrice);
-    if(qty <= 0) {
+    
+    if(parseFloat(qty) <= 0) {
         console.log(`[Strategy] 💰 Balance insufficient`);
         return false;
     }
 
-    console.log(`[Strategy] 📝 Submitting: Qty ${qty} @ Price ${orderPrice} (Balance: ${this.availableBalance})`);
+    console.log(`[Strategy] 📝 Submitting ${this.side.toUpperCase()}: Qty ${qty} @ Price ${orderPrice} (Balance: ${this.availableBalance})`);
+    
     try {
-      const res = await this.api.newOrder(this.symbol, 'buy', 'limit', qty, orderPrice);
+      const res = await this.api.newOrder(this.symbol, orderSide, 'limit', qty, orderPrice);
       if (res.code !== 0) {
         console.error(`[Strategy] ❌ Server Rejected: ${res.message}`);
         return false;
       }
 
-      console.log(`[Strategy] 🔍 Verifying...`);
+      console.log(`[Strategy] 🔍 Verifying order status on-chain...`);
       for (let i = 0; i < 3; i++) {
         await new Promise(r => setTimeout(r, 1500)); 
         const openOrders = await this.api.queryOpenOrders(this.symbol);
         if (openOrders.result?.some(o => new Decimal(String(o.price)).equals(orderPrice))) {
-          console.log(`[Strategy] ✅ Order VERIFIED.`);
-          console.log(`🎯[Live Range] 【${(orderPrice * (1 + this.changeThreshold_high)).toFixed(2)} ———— ${(orderPrice * (1 + this.changeThreshold_low)).toFixed(2)}】`);
+          console.log(`[Strategy] ✅ ${this.side.toUpperCase()} Order VERIFIED.`);
+          
+          // --- 恢复你的 Live Range 打印 ---
+          if (this.side === 'short') {
+            console.log(`🎯[Live Range] 【${(orderPrice * (1 - this.changeThreshold_high)).toFixed(2)} ———— ${(orderPrice * (1 - this.changeThreshold_low)).toFixed(2)}】`);
+          } else {
+            console.log(`🎯[Live Range] 【${(orderPrice * (1 + this.changeThreshold_high)).toFixed(2)} ———— ${(orderPrice * (1 + this.changeThreshold_low)).toFixed(2)}】`);
+          }
+          
           this.initialPrice = orderPrice;
           return true;
         }
+        console.log(`[Strategy] ⏳ Attempt ${i+1}: Not on-chain yet...`);
       }
       return false;
     } catch (e) { return false; }
@@ -120,24 +160,17 @@ export default class BidStrategy {
     if (this.isProcessing || this.emergencyMode) return;
     this.isProcessing = true;
 
-    console.log(`\n--- 🔄 Cycle Start (Market: ${marketPrice}) ---`);
+    console.log(`\n--- 🔄 Cycle Start (${this.side.toUpperCase()} @ Market: ${marketPrice}) ---`);
     try {
-      // 1. 检查并清理仓位
-      const hadPosition = await this.checkAndClosePositions();
-      
-      // 2. 清理挂单
+      await this.checkAndClosePositions();
       await this.clearAllOpenOrders();
       await new Promise(r => setTimeout(r, 500)); 
 
-      // 3. 刷新余额并下单
       const balance = await this.api.queryBalance();
       this.availableBalance = parseFloat(balance.cross_available);
 
       const success = await this.placeAndVerify(marketPrice);
       if (!success) this.initialPrice = null;
-
-    } catch (err) {
-      console.error('[Strategy] Critical Loop Error:', err.message);
     } finally {
       this.isProcessing = false;
       console.log(`--- ✅ Cycle Finished ---\n`);
@@ -156,18 +189,12 @@ export default class BidStrategy {
         this.emergencyMode = true;
         await this.clearAllOpenOrders();
       } else if (!isDead && this.emergencyMode) {
-        console.log('[WATCHDOG] 🟢 Recovered.');
         this.emergencyMode = false;
         this.initialPrice = null;
       }
       
-      // 主动轮询仓位，如果发现仓位，触发一次 reorder 重新开始
       if (!this.isProcessing && !this.emergencyMode) {
-        const found = await this.checkAndClosePositions();
-        if (found) {
-            console.log(`[Watchdog] 🛡️ Emergency clear done. Re-entering loop...`);
-            await this.reorder(this.priceMonitor.getPrice());
-        }
+        await this.checkAndClosePositions();
       }
     }, 5000); 
   }
@@ -187,25 +214,23 @@ export default class BidStrategy {
         if (!this.initialPrice) {
           await this.reorder(p);
         } else {
-          let diff = Math.abs((parseFloat(p / this.initialPrice) - 1));
-          if (diff >= this.changeThreshold_high || diff <= this.changeThreshold_low) {
-            console.log(`[Strategy] 🔄 Price Moved. Reordering...`);
-            await this.reorder(p);
+          // --- 恢复你的 Price Moved 日志 ---
+          if (this.shouldReorder(p)) {
+             console.log(`[Strategy] 🔄 Price moved out of range. Current: ${p}`);
+             await this.reorder(p);
           }
         }
       });
 
       this.priceMonitor.onPosition(async (data) => {
         const qty = new Decimal(String(data.qty || 0)).abs();
-        if (qty.gt(0) && !this.isProcessing) {
-          console.warn(`[Risk] ⚠️ WS Alert! Position found: ${data.qty}`);
-          // 这里的逻辑是：通过重置 initialPrice 并调用 reorder
-          // reorder 内部会先跑 checkAndClosePositions 平仓，然后再挂新单
+        if (qty.gt(0)) {
+          console.warn(`[Risk] ⚠️ WS Position Alert! Qty: ${data.qty}`);
           this.initialPrice = null;
           await this.reorder(this.priceMonitor.getPrice());
         }
       });
-    } catch (e) { console.error('[Strategy] 💀 Initialization Failed:', e.message); }
+    } catch (e) { console.error('[Strategy] 💀 Start Error:', e.message); }
   }
 
   async stop() {

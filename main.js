@@ -44,6 +44,10 @@ async function main() {
     const accountKey = process.env.ACCOUNT_KEY || 'standx:account:1';
     const config = await getConfig(accountKey);
 
+    // 读取命令行传入的 SIDE 参数，默认为 long
+    const side = config.side || process.env.SIDE || 'long'; 
+    console.log(`[System] 🚀 Bot Direction: ${side.toUpperCase()}`);
+
     if (!config) throw new Error('Config not found');
 
     // 1. 获取并处理代理地址
@@ -72,7 +76,7 @@ async function main() {
     priceMonitor = new PriceMonitor(symbol, proxy);
     await priceMonitor.connect();
 
-    strategy = new BidStrategy(api, priceMonitor, symbol);
+    strategy = new BidStrategy(api, priceMonitor, symbol, side);
     await strategy.start();
 
     console.log('✅ Bot running. Ctrl+C to exit.');

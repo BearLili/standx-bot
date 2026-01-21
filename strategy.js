@@ -11,6 +11,10 @@ export default class BidStrategy {
     this.isProcessing = false;
     this.emergencyMode = false;
     this.watchdogTimer = null;
+
+    // --- 新增：冷静期标记 (毫秒) ---
+    this.lastEmergencyTime = 0;
+    this.COOLDOWN_MS = 10 * 60 * 1000; // 10分钟
     
     // 策略参数
     this.offsetPercentage = 0.0022; 
@@ -22,6 +26,22 @@ export default class BidStrategy {
     this.reorder = this.reorder.bind(this);
     this.checkAndClosePositions = this.checkAndClosePositions.bind(this);
     this.clearAllOpenOrders = this.clearAllOpenOrders.bind(this);
+  }
+
+  // 辅助方法：检查是否处于冷静期
+  isInCooldown() {
+    if (this.lastEmergencyTime === 0) return false;
+    const elapsed = Date.now() - this.lastEmergencyTime;
+    const remaining = this.COOLDOWN_MS - elapsed;
+    
+    if (remaining > 0) {
+      // 每隔一分钟打印一次倒计时，避免日志刷屏
+      if (Math.floor(elapsed / 1000) % 60 === 0) {
+        console.log(`[Strategy] 🧊 Cooldown Active: ${(remaining / 1000 / 60).toFixed(1)} min remaining.`);
+      }
+      return true;
+    }
+    return false;
   }
 
   // 根据多空方向计算挂单价格
@@ -81,7 +101,8 @@ export default class BidStrategy {
           await this.clearAllOpenOrders();
           const res = await this.api.marketOrder(this.symbol, side, qty.toString());
           console.log(`[Risk] Market Close Success: ${JSON.stringify(res)}`);
-          
+          // --- 关键修改：记录触发平仓的时间，开启10分钟冷静期 ---
+          this.lastEmergencyTime = Date.now();
           this.initialPrice = null; // 平仓后强制触发重挂
           await new Promise(r => setTimeout(r, 1000));
         }
@@ -168,7 +189,12 @@ export default class BidStrategy {
 
       const balance = await this.api.queryBalance();
       this.availableBalance = parseFloat(balance.cross_available);
-
+      // --- 关键拦截：冷静期内禁止执行挂单逻辑 ---
+      if (this.isInCooldown()) {
+        this.initialPrice = null;
+        console.log(`[Strategy] 🧊 Cooldown Active`);
+        return;
+      }
       const success = await this.placeAndVerify(marketPrice);
       if (!success) this.initialPrice = null;
     } finally {

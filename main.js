@@ -46,7 +46,9 @@ async function main() {
 
     // 读取命令行传入的 SIDE 参数，默认为 long
     const side = config.side || process.env.SIDE || 'long'; 
-    console.log(`[System] 🚀 Bot Direction: ${side.toUpperCase()}`);
+    // 从 Redis 获取杠杆，如果没有则默认 1
+    const leverage = parseInt(config.leverage) || 1;
+    console.log(`[System] 🚀 Bot Direction: ${side.toUpperCase()} Leverage: ${leverage}`);
 
     if (!config) throw new Error('Config not found');
 
@@ -76,7 +78,7 @@ async function main() {
     priceMonitor = new PriceMonitor(symbol, proxy);
     await priceMonitor.connect();
 
-    strategy = new BidStrategy(api, priceMonitor, symbol, side);
+    strategy = new BidStrategy(api, priceMonitor, symbol, side, leverage);
     await strategy.start();
 
     console.log('✅ Bot running. Ctrl+C to exit.');

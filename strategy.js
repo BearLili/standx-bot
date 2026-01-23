@@ -1,26 +1,26 @@
 import Decimal from 'decimal.js';
 
 export default class BidStrategy {
-  constructor(api, priceMonitor, symbol, side = 'long') {
+  constructor(api, priceMonitor, symbol, side = 'long', leverage = 40) {
     this.api = api;
     this.priceMonitor = priceMonitor;
     this.symbol = symbol;
-    this.side = side.toLowerCase(); // 'long' 或 'short'
-    
+    this.side = side.toLowerCase(); 
+    this.leverage = leverage; // 从 Redis 动态获取的杠杆
+
     this.initialPrice = null;
     this.isProcessing = false;
     this.emergencyMode = false;
     this.watchdogTimer = null;
 
-    // --- 新增：冷静期标记 (毫秒) ---
-    this.lastEmergencyTime = 0;
+    // 冷静期配置
+    this.lastEmergencyTime = 0; 
     this.COOLDOWN_MS = 10 * 60 * 1000; // 10分钟
     
     // 策略参数
     this.offsetPercentage = 0.0022; 
     this.changeThreshold_high = 0.004; 
     this.changeThreshold_low = 0.0012; 
-    this.leverage = 40;
     this.availableBalance = 0;
 
     this.reorder = this.reorder.bind(this);
@@ -28,14 +28,13 @@ export default class BidStrategy {
     this.clearAllOpenOrders = this.clearAllOpenOrders.bind(this);
   }
 
-  // 辅助方法：检查是否处于冷静期
+  // 冷静期判定逻辑
   isInCooldown() {
     if (this.lastEmergencyTime === 0) return false;
     const elapsed = Date.now() - this.lastEmergencyTime;
     const remaining = this.COOLDOWN_MS - elapsed;
     
     if (remaining > 0) {
-      // 每隔一分钟打印一次倒计时，避免日志刷屏
       if (Math.floor(elapsed / 1000) % 60 === 0) {
         console.log(`[Strategy] 🧊 Cooldown Active: ${(remaining / 1000 / 60).toFixed(1)} min remaining.`);
       }
@@ -44,35 +43,25 @@ export default class BidStrategy {
     return false;
   }
 
-  // 根据多空方向计算挂单价格
+  // 价格计算
   calculateOrderPrice(marketPrice) {
     const p = new Decimal(marketPrice);
-    if (this.side === 'short') {
-      // 做空：在市价上方挂卖单
-      return p.times(new Decimal(1).plus(this.offsetPercentage)).toFixed(2);
-    } else {
-      // 做多：在市价下方挂买单
-      return p.times(new Decimal(1).minus(this.offsetPercentage)).toFixed(2);
-    }
+    return this.side === 'short' 
+      ? p.times(new Decimal(1).plus(this.offsetPercentage)).toFixed(2)
+      : p.times(new Decimal(1).minus(this.offsetPercentage)).toFixed(2);
   }
 
-  // 根据多空方向判定是否需要撤单重挂
+  // 判定重挂区间
   shouldReorder(currentPrice) {
     if (!this.initialPrice) return true;
-    
     const p = parseFloat(currentPrice);
     const i = parseFloat(this.initialPrice);
     const diff = p / i;
 
     if (this.side === 'short') {
-      // 做空逻辑判定:
-      // (diff <= 1 - 0.004) -> 价格跌太深，远离了上方的卖单
-      // (diff >= 1 - 0.0012) -> 价格涨太高，逼近了上方的卖单
       return (diff <= (1 - this.changeThreshold_high)) || (diff >= (1 - this.changeThreshold_low));
     } else {
-      // 做多逻辑判定 (原逻辑):
-      let absDiff = Math.abs(diff - 1);
-      return absDiff >= this.changeThreshold_high || absDiff <= this.changeThreshold_low;
+      return Math.abs(diff - 1) >= this.changeThreshold_high || Math.abs(diff - 1) <= this.changeThreshold_low;
     }
   }
 
@@ -101,9 +90,12 @@ export default class BidStrategy {
           await this.clearAllOpenOrders();
           const res = await this.api.marketOrder(this.symbol, side, qty.toString());
           console.log(`[Risk] Market Close Success: ${JSON.stringify(res)}`);
-          // --- 关键修改：记录触发平仓的时间，开启10分钟冷静期 ---
+          
+          // 开启10分钟冷静期
           this.lastEmergencyTime = Date.now();
-          this.initialPrice = null; // 平仓后强制触发重挂
+          this.initialPrice = null; 
+          console.log(`[Strategy] 🧊 Cooldown started. Next order possible at: ${new Date(this.lastEmergencyTime + this.COOLDOWN_MS).toLocaleTimeString()}`);
+          
           await new Promise(r => setTimeout(r, 1000));
         }
         return true; 
@@ -113,14 +105,6 @@ export default class BidStrategy {
       console.error('[Risk] ❌ Position Check Failed:', e.message);
       return false;
     }
-  }
-
-  calculateQty(price) {
-    try {
-      if (this.availableBalance <= 0) return 0;
-      const qty = new Decimal(this.availableBalance).times(this.leverage).times(0.95).dividedBy(price);
-      return (qty.toNumber() * 0.8).toFixed(3); 
-    } catch (e) { return 0; }
   }
 
   async clearAllOpenOrders() {
@@ -137,92 +121,60 @@ export default class BidStrategy {
 
   async placeAndVerify(marketPrice) {
     const orderPrice = this.calculateOrderPrice(marketPrice);
-    const orderSide = this.side === 'short' ? 'sell' : 'buy'; // 自动切换下单方向
-    const qty = this.calculateQty(orderPrice);
+    const orderSide = this.side === 'short' ? 'sell' : 'buy';
     
-    if(parseFloat(qty) <= 0) {
-        console.log(`[Strategy] 💰 Balance insufficient`);
-        return false;
-    }
+    if (this.availableBalance <= 0) return false;
+    // 使用动态杠杆计算数量
+    const qty = new Decimal(this.availableBalance).times(this.leverage).times(0.95).dividedBy(orderPrice).times(0.8).toFixed(3);
 
-    console.log(`[Strategy] 📝 Submitting ${this.side.toUpperCase()}: Qty ${qty} @ Price ${orderPrice} (Balance: ${this.availableBalance})`);
-    
+    if (parseFloat(qty) <= 0) return false;
+
+    console.log(`[Strategy] 📝 Submitting ${this.side.toUpperCase()}: Qty ${qty} @ Price ${orderPrice} (Lev: ${this.leverage}x)`);
     try {
       const res = await this.api.newOrder(this.symbol, orderSide, 'limit', qty, orderPrice);
-      if (res.code !== 0) {
-        console.error(`[Strategy] ❌ Server Rejected: ${res.message}`);
-        return false;
-      }
+      if (res.code !== 0) return false;
 
-      console.log(`[Strategy] 🔍 Verifying order status on-chain...`);
+      console.log(`[Strategy] 🔍 Verifying...`);
       for (let i = 0; i < 3; i++) {
         await new Promise(r => setTimeout(r, 1500)); 
         const openOrders = await this.api.queryOpenOrders(this.symbol);
         if (openOrders.result?.some(o => new Decimal(String(o.price)).equals(orderPrice))) {
           console.log(`[Strategy] ✅ ${this.side.toUpperCase()} Order VERIFIED.`);
           
-          // --- 恢复你的 Live Range 打印 ---
+          // 恢复 Live Range 打印
+          const highBound = (new Decimal(orderPrice).times(1 + this.changeThreshold_high)).toFixed(2);
+          const lowBound = (new Decimal(orderPrice).times(1 + this.changeThreshold_low)).toFixed(2);
+          const shortHigh = (new Decimal(orderPrice).times(1 - this.changeThreshold_high)).toFixed(2);
+          const shortLow = (new Decimal(orderPrice).times(1 - this.changeThreshold_low)).toFixed(2);
+          
           if (this.side === 'short') {
-            console.log(`🎯[Live Range] 【${(orderPrice * (1 - this.changeThreshold_high)).toFixed(2)} ———— ${(orderPrice * (1 - this.changeThreshold_low)).toFixed(2)}】`);
+            console.log(`🎯[Live Range] 【${shortHigh} ———— ${shortLow}】`);
           } else {
-            console.log(`🎯[Live Range] 【${(orderPrice * (1 + this.changeThreshold_high)).toFixed(2)} ———— ${(orderPrice * (1 + this.changeThreshold_low)).toFixed(2)}】`);
+            console.log(`🎯[Live Range] 【${highBound} ———— ${lowBound}】`);
           }
           
           this.initialPrice = orderPrice;
           return true;
         }
-        console.log(`[Strategy] ⏳ Attempt ${i+1}: Not on-chain yet...`);
       }
       return false;
     } catch (e) { return false; }
   }
 
   async reorder(marketPrice) {
-    if (this.isProcessing || this.emergencyMode) return;
+    if (this.isProcessing || this.emergencyMode || this.isInCooldown()) return;
     this.isProcessing = true;
-
     console.log(`\n--- 🔄 Cycle Start (${this.side.toUpperCase()} @ Market: ${marketPrice}) ---`);
     try {
       await this.checkAndClosePositions();
       await this.clearAllOpenOrders();
-      await new Promise(r => setTimeout(r, 500)); 
-
       const balance = await this.api.queryBalance();
       this.availableBalance = parseFloat(balance.cross_available);
-      // --- 关键拦截：冷静期内禁止执行挂单逻辑 ---
-      if (this.isInCooldown()) {
-        this.initialPrice = null;
-        console.log(`[Strategy] 🧊 Cooldown Active`);
-        return;
-      }
-      const success = await this.placeAndVerify(marketPrice);
-      if (!success) this.initialPrice = null;
+      await this.placeAndVerify(marketPrice);
     } finally {
       this.isProcessing = false;
       console.log(`--- ✅ Cycle Finished ---\n`);
     }
-  }
-
-  startWatchdog() {
-    this.watchdogTimer = setInterval(async () => {
-      if (this.isProcessing) return; 
-
-      const status = this.priceMonitor.getStatus();
-      const isDead = (!status.isConnected && status.secondsSinceLastUpdate > 10) || status.secondsSinceLastUpdate > 30;
-
-      if (isDead && !this.emergencyMode) {
-        console.error(`[WATCHDOG] 🚨 Connection Lost! Lag: ${status.secondsSinceLastUpdate}s`);
-        this.emergencyMode = true;
-        await this.clearAllOpenOrders();
-      } else if (!isDead && this.emergencyMode) {
-        this.emergencyMode = false;
-        this.initialPrice = null;
-      }
-      
-      if (!this.isProcessing && !this.emergencyMode) {
-        await this.checkAndClosePositions();
-      }
-    }, 5000); 
   }
 
   async start() {
@@ -230,38 +182,36 @@ export default class BidStrategy {
       await this.checkAndClosePositions();
       const balance = await this.api.queryBalance();
       this.availableBalance = parseFloat(balance.cross_available);
-      console.log(`[Init] 💰 Available: ${this.availableBalance} U`);
-
+      
+      // 使用动态杠杆设置交易所杠杆
       await this.api.changeLeverage(this.symbol, this.leverage);
-      this.startWatchdog();
+      console.log(`[Init] 💰 Available: ${this.availableBalance} U | Leverage set to ${this.leverage}x`);
+
+      this.watchdogTimer = setInterval(async () => {
+        if (!this.isProcessing) await this.checkAndClosePositions();
+      }, 5000);
 
       this.priceMonitor.onPrice(async (p) => {
-        if (this.emergencyMode || this.isProcessing) return;
-        if (!this.initialPrice) {
+        if (this.isProcessing || this.emergencyMode || this.isInCooldown()) return;
+        if (this.shouldReorder(p)) {
+          if (this.initialPrice) console.log(`[Strategy] 🔄 Price moved. Reordering...`);
           await this.reorder(p);
-        } else {
-          // --- 恢复你的 Price Moved 日志 ---
-          if (this.shouldReorder(p)) {
-             console.log(`[Strategy] 🔄 Price moved out of range. Current: ${p}`);
-             await this.reorder(p);
-          }
         }
       });
 
       this.priceMonitor.onPosition(async (data) => {
         const qty = new Decimal(String(data.qty || 0)).abs();
         if (qty.gt(0)) {
-          console.warn(`[Risk] ⚠️ WS Position Alert! Qty: ${data.qty}`);
+          console.warn(`[Risk] ⚠️ WS Position Alert!`);
           this.initialPrice = null;
           await this.reorder(this.priceMonitor.getPrice());
         }
       });
-    } catch (e) { console.error('[Strategy] 💀 Start Error:', e.message); }
+    } catch (e) { console.error('Start Error:', e.message); }
   }
 
   async stop() {
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
-    await this.checkAndClosePositions();
     await this.clearAllOpenOrders();
   }
 }
